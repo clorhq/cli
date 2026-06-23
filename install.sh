@@ -269,13 +269,6 @@ main() {
     rm -f "${SUMTMP}"
     trap - EXIT
 
-    # macOS marks downloaded files with com.apple.quarantine, which
-    # causes Gatekeeper to refuse the first execution. Strip it now,
-    # before the --help check below, so we don't reject a good binary.
-    if [[ "${OS}" == "darwin" ]] && command -v xattr >/dev/null 2>&1; then
-        xattr -d com.apple.quarantine "${VERSIONED_EXE}" >/dev/null 2>&1 || true
-    fi
-
     # ------------------------------------------------------------------
     # Make sure it actually runs.
     #
