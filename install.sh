@@ -23,7 +23,7 @@ set -o pipefail
 
 DEBUG="${DEBUG:-false}"
 SUPPORT_EMAIL="support@clor.com"
-DEFAULT_VERSION="v1.3.0"
+DEFAULT_VERSION="v1.3.2"
 VERSION="${CLOR_VERSION:-${DEFAULT_VERSION}}"
 INSTALL_DIR="${HOME}/.local/bin"
 EXE="${INSTALL_DIR}/clor"
