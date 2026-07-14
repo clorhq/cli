@@ -1,25 +1,18 @@
 #!/bin/bash
 # Install or upgrade the clor CLI under ~/.local/bin.
 #
-# Safe to re-run. Each run downloads the pinned version, verifies its
-# SHA256 against the published checksum, drops it into a versioned
-# directory under ~/.local/share/clor/<version>/, and then flips the
-# ~/.local/bin/clor symlink to point at it. So "upgrade" and "install"
-# are the same code path, and rollback is one ln command.
+# Safe to re-run. Downloads the pinned version, verifies its SHA256,
+# stores it under ~/.local/share/clor/<version>/, and points the
+# ~/.local/bin/clor symlink at it.
 #
-# Quiet by default. Set DEBUG=true if you want to see what's happening.
+# Quiet by default. Set DEBUG=true for progress output.
 
 set -o errexit
 set -o nounset
 set -o pipefail
 
-# ----------------------------------------------------------------------
-# Config.
-#
-# DEBUG is read from the env so you can do `DEBUG=true bash install.sh`
-# without editing the file. Same idea for CLOR_VERSION if you want to
-# pin or test a specific release.
-# ----------------------------------------------------------------------
+# DEBUG and CLOR_VERSION are read from the env: `DEBUG=true bash install.sh`
+# or `CLOR_VERSION=v1.2.3 bash install.sh`.
 
 DEBUG="${DEBUG:-false}"
 SUPPORT_EMAIL="support@clor.com"
@@ -35,14 +28,9 @@ PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
 RC_MARKER="# Added by clor install.sh"
 MAX_ATTEMPTS=5
 
-# ----------------------------------------------------------------------
-# Logging.
-#
-# Three levels: chatty progress (debug, off by default), things the
-# user has to see even on a successful install (info, e.g. PATH
-# instructions), and failures (error). Everything goes to stderr so
-# stdout stays clean for anything that might pipe this script.
-# ----------------------------------------------------------------------
+# debug is off by default; info is for messages the user must see even on
+# success; error is for failures. Everything goes to stderr so stdout stays
+# clean when piped.
 
 log_debug() {
     if [[ "${DEBUG}" == "true" ]]; then
@@ -58,21 +46,14 @@ log_error() {
     printf 'error: %s\n' "$*" >&2
 }
 
-# Printed after errors the user can't fix locally (corrupt release
-# asset, repeated CDN failures, checksum mismatch). Local-environment
-# problems like "you don't have curl" get a different suggestion in
-# the error itself.
+# Printed after errors the user cannot fix locally.
 log_support_hint() {
     printf 'If this keeps happening, contact %s for help.\n' "${SUPPORT_EMAIL}" >&2
 }
 
-# ----------------------------------------------------------------------
-# Downloads.
-#
-# Retry with backoff. A new release sometimes 404s on the CDN for a
-# few seconds after publish, and networks drop packets occasionally.
-# Same helper is used for the binary and its .sha256 checksum file.
-# ----------------------------------------------------------------------
+# Download with retry and backoff: fresh releases sometimes 404 on the CDN
+# for a few seconds, and networks drop. Used for both the binary and its
+# checksum.
 
 download_with_retry() {
     local url="$1"
@@ -104,27 +85,15 @@ download_with_retry() {
     done
 }
 
-# ----------------------------------------------------------------------
-# main
-#
-# Everything below runs inside a function so the script only executes
-# once the whole file has been parsed. That matters for the
-# curl-to-bash flow: if the connection drops mid-download, bash never
-# sees `main "$@"` at the bottom and bails out instead of running half
-# a script.
-# ----------------------------------------------------------------------
+# Everything runs inside main() so that a connection drop mid-download
+# leaves bash without the final `main "$@"` line and nothing executes.
 
 main() {
     local OS ARCH ASSET URL DOWNLOADER TMP SUMTMP EXPECTED ACTUAL
     local shell_name modified rc
     local rcs
 
-    # ------------------------------------------------------------------
-    # Which binary do we want?
-    #
-    # uname tells us, plus a special case below for Rosetta. We name
-    # release assets clor-<os>-<arch> so this maps directly to a URL.
-    # ------------------------------------------------------------------
+    # Map uname to a release asset name, clor-<os>-<arch>.
 
     OS="$(uname -s)"
     ARCH="$(uname -m)"
@@ -149,10 +118,8 @@ main() {
             ;;
     esac
 
-    # On Apple Silicon, bash itself may be the x86_64 build running
-    # under Rosetta. If so, uname reports amd64 even though the native
-    # binary would be faster. proc_translated == 1 means "yes, you're
-    # in Rosetta", so flip to arm64.
+    # Under Rosetta uname reports amd64 on Apple Silicon; install the
+    # native arm64 build instead.
     if [[ "${OS}" == "darwin" && "${ARCH}" == "amd64" ]]; then
         if [[ "$(sysctl -n sysctl.proc_translated 2>/dev/null || true)" == "1" ]]; then
             ARCH="arm64"
@@ -162,9 +129,7 @@ main() {
     ASSET="clor-${OS}-${ARCH}"
     URL="${BASE_URL}/${ASSET}"
 
-    # ------------------------------------------------------------------
-    # Pick a downloader. Either curl or wget works.
-    # ------------------------------------------------------------------
+    # curl or wget, whichever exists.
 
     if command -v curl >/dev/null 2>&1; then
         DOWNLOADER="curl"
@@ -176,22 +141,14 @@ main() {
         exit 1
     fi
 
-    # ------------------------------------------------------------------
-    # Lay out the install tree.
-    #
-    #   ~/.local/share/clor/<version>/clor   the real binary
-    #   ~/.local/bin/clor                    symlink to the active one
-    #
-    # Keeping versioned binaries on disk means rollback is just
-    # repointing the symlink. ~/.local/bin stays tidy.
-    # ------------------------------------------------------------------
+    # ~/.local/share/clor/<version>/clor is the real binary;
+    # ~/.local/bin/clor is a symlink to the active one, so rollback is one
+    # ln command.
 
     mkdir -p "${INSTALL_DIR}" "${VERSION_DIR}"
 
-    # Download to a temp file in the versioned dir, then rename(2)
-    # into place once we've verified it. Same filesystem so the
-    # rename is atomic, and any clor process that's already running
-    # keeps its old inode and won't see a torn write.
+    # Download to a temp file in the versioned directory, verify, then
+    # rename(2) into place atomically; a running clor keeps its old inode.
     TMP="${VERSIONED_EXE}.tmp.$$"
     SUMTMP="${TMP}.sha256"
     trap 'rm -f "${TMP}" "${SUMTMP}"' EXIT
@@ -202,10 +159,6 @@ main() {
         log_debug "Installing clor to ${EXE}..."
     fi
 
-    # ------------------------------------------------------------------
-    # Download the binary.
-    # ------------------------------------------------------------------
-
     log_debug "Downloading ${URL}..."
     download_with_retry "${URL}" "${TMP}" || exit 1
 
@@ -215,14 +168,8 @@ main() {
         exit 1
     fi
 
-    # ------------------------------------------------------------------
-    # Verify the download.
-    #
-    # We never install a binary we can't verify. The .sha256 sidecar
-    # is published next to the binary on every release; if it's
-    # missing, malformed, or the digest doesn't match what's on disk,
-    # we bail out and leave the existing install untouched.
-    # ------------------------------------------------------------------
+    # Never install an unverified binary. Bail if the published .sha256 is
+    # missing, malformed, or does not match the download.
 
     log_debug "Verifying checksum..."
     if ! download_with_retry "${URL}.sha256" "${SUMTMP}"; then
@@ -260,23 +207,13 @@ main() {
         exit 1
     fi
 
-    # ------------------------------------------------------------------
-    # Park the verified binary in the versioned directory.
-    # ------------------------------------------------------------------
-
     chmod +x "${TMP}"
     mv -f "${TMP}" "${VERSIONED_EXE}"
     rm -f "${SUMTMP}"
     trap - EXIT
 
-    # ------------------------------------------------------------------
-    # Make sure it actually runs.
-    #
-    # `--help` is cheap and exercises arg parsing, so it's a reasonable
-    # "does the binary load and execute" check. If it fails, we leave
-    # the existing symlink alone so the user still has a working clor,
-    # and we clean up the broken versioned copy.
-    # ------------------------------------------------------------------
+    # Refuse to activate a binary that cannot run --help, and keep the
+    # existing install working.
 
     log_debug "Verifying ${VERSIONED_EXE} --help runs..."
     if ! "${VERSIONED_EXE}" --help >/dev/null 2>&1; then
@@ -287,27 +224,15 @@ main() {
         exit 1
     fi
 
-    # ------------------------------------------------------------------
-    # Activate the new version.
-    #
-    # Remove whatever was at ${EXE} (real binary from a pre-symlink
-    # install, stale symlink, or nothing) and point a fresh symlink at
-    # the versioned binary.
-    # ------------------------------------------------------------------
+    # Point the symlink at the new version.
 
     rm -f "${EXE}"
     ln -s "${VERSIONED_EXE}" "${EXE}"
     log_debug "Linked ${EXE} -> ${VERSIONED_EXE}"
 
-    # ------------------------------------------------------------------
-    # PATH.
-    #
-    # If ~/.local/bin isn't on PATH yet, try to add it for the user's
-    # shell. fish has its own universal-path mechanism; bash and zsh
-    # get a line appended to the right rc file, marked so re-runs
-    # don't duplicate it. We tell the user what we did so they know
-    # to open a new shell.
-    # ------------------------------------------------------------------
+    # Add ~/.local/bin to PATH for the user's shell when missing. fish uses
+    # its universal path; bash and zsh get a marked rc line so re-runs do
+    # not duplicate it.
 
     case ":${PATH}:" in
         *":${INSTALL_DIR}:"*)
@@ -351,28 +276,11 @@ main() {
             ;;
     esac
 
-    # ------------------------------------------------------------------
-    # Hand off to clor itself.
-    #
-    # Drive the rest of the setup: interactive sign-in, then register
-    # the daemon as a user-scope service, then install the plugin into
-    # every detected agent. Each subcommand is idempotent, so re-runs
-    # are safe. If the user Ctrl-Cs through any step, the binary is
-    # still in place and they can re-run install.sh or invoke the
-    # specific subcommand later.
-    #
-    # CLOR_INSTALL_FROM_CLI is set by `clor install` itself when it
-    # shells out to this script; in that case the parent will run the
-    # same steps after we return, so skip them here to avoid doing the
-    # work twice.
-    #
-    # When no real terminal is available (CI, Dockerfiles, agent-driven
-    # setup), we stop after landing the binary and print the one command
-    # the user should run next. The `curl | bash` case still counts as
-    # interactive: stdin is a pipe but the user is sitting at a terminal
-    # we can reach via /dev/tty, which is what we hand to the sign-in
-    # and install subcommands.
-    # ------------------------------------------------------------------
+    # With a terminal available, continue setup: sign in, then register the
+    # daemon service and plugin via `clor install`. CLOR_INSTALL_FROM_CLI=1
+    # means `clor install` invoked this script and runs those steps itself.
+    # Without a terminal (CI, Dockerfiles), stop after installing the
+    # binary and print the next command.
 
     if [[ "${CLOR_INSTALL_FROM_CLI:-}" != "1" ]]; then
         if [[ -t 1 && -r /dev/tty ]]; then
