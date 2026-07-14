@@ -188,6 +188,22 @@ main() {
 
     mkdir -p "${INSTALL_DIR}" "${VERSION_DIR}"
 
+    # ------------------------------------------------------------------
+    # Short-circuit when the target version is already active.
+    #
+    # Boot-time and scripted re-runs (container entrypoints, cron,
+    # `clor install cli`) call this unconditionally; skipping the
+    # download when the active binary already reports the target
+    # version makes those re-runs nearly free. Forcing a reinstall of
+    # the same version is one `rm ~/.local/bin/clor` away.
+    # ------------------------------------------------------------------
+
+    if [[ -x "${EXE}" ]] \
+        && [[ "$("${EXE}" --version 2>/dev/null | awk '{print $NF}')" == "${VERSION}" ]]; then
+        log_info "clor ${VERSION} is already installed at ${EXE}; nothing to do."
+        exit 0
+    fi
+
     # Download to a temp file in the versioned dir, then rename(2)
     # into place once we've verified it. Same filesystem so the
     # rename is atomic, and any clor process that's already running
