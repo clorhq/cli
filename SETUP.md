@@ -25,7 +25,7 @@ Detects your OS/arch, downloads the matching binary into
 `~/.local/bin/clor`, verifies its SHA-256 against the published
 sidecar, adds `~/.local/bin` to `PATH` if missing, and runs `clor`.
 It also schedules `clor install` every six hours using a systemd timer on
-Linux or a launchd agent on macOS. Each run refreshes normal daemon and plugin
+Linux or a launchd agent on macOS. Each run refreshes normal daemon and skill
 setup, but the installer skips the binary download when `clor version`
 already matches the requested release. A failed run is attempted again at the
 next scheduled time.
@@ -100,7 +100,7 @@ curl https://clor.com/install.sh | CLOR_VERSION="v1.7.1" CLOR_AUTOUPDATE="true" 
 ## Uninstalling
 
 Disable the updater before uninstalling. Otherwise a scheduled full
-install could restore daemon or plugin components after they are removed.
+install could restore daemon or skill components after they are removed.
 
 ```sh
 # macOS / Linux

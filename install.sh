@@ -376,7 +376,7 @@ main() {
     URL="${BASE_URL}/${ASSET}"
 
     # A normal install is a no-op for the binary when the requested version
-    # is already active. The caller may still continue with daemon and plugin
+    # is already active. The caller may still continue with daemon and skill
     # setup after this script returns. CLOR_INSTALL_FORCE=true reinstalls and
     # verifies the binary even when the versions match.
 
@@ -545,8 +545,9 @@ main() {
     configure_autoupdate "${OS}"
 
     # With a terminal available, continue setup: sign in, then register the
-    # daemon service and plugin via `clor install`. CLOR_INSTALL_FROM_CLI=1
-    # means `clor install` invoked this script and runs those steps itself.
+    # daemon service and install the skills via `clor install`.
+    # CLOR_INSTALL_FROM_CLI=1 means `clor install` invoked this script and
+    # runs those steps itself.
     # Without a terminal (CI, Dockerfiles), stop after installing the
     # binary and print the next command.
 
