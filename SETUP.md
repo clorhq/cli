@@ -74,8 +74,9 @@ for `--wait` and other options.
 
 Automatic installs check every six hours. You can also re-run
 `curl https://clor.com/install.sh | bash` or re-run the manual install
-command for your platform. The new binary replaces the active version
-atomically.
+command for your platform. The new binary replaces `~/.local/bin/clor` in
+place, atomically, and no old versions are kept. A `clor` process that is
+already running keeps working until it exits.
 
 A normal install skips downloading the binary when the installed version
 already matches `LATEST_VERSION` (or an explicit `CLOR_VERSION`). Use
@@ -107,6 +108,6 @@ install could restore daemon or skill components after they are removed.
 CLOR_AUTOUPDATE="false" clor install
 clor uninstall
 rm ~/.local/bin/clor
-rm -rf ~/.local/share/clor
+rm -rf ~/.local/share/clor  # only present for installs made by older versions
 rm -rf ~/.clor
 ```

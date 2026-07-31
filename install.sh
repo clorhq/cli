@@ -1,9 +1,9 @@
 #!/bin/bash
 # Install or upgrade the clor CLI under ~/.local/bin.
 #
-# Safe to re-run. Downloads the pinned version, verifies its SHA256,
-# stores it under ~/.local/share/clor/<version>/, and points the
-# ~/.local/bin/clor symlink at it.
+# Safe to re-run. Downloads the pinned version, verifies its SHA256, and
+# renames it over ~/.local/bin/clor, which is the one real binary. No old
+# versions are kept.
 #
 # Quiet by default. Set DEBUG=true for progress output.
 
@@ -30,9 +30,8 @@ if [[ "${CLOR_AUTOUPDATE:-}" == "" ]]; then
 fi
 INSTALL_DIR="${HOME}/.local/bin"
 EXE="${INSTALL_DIR}/clor"
-VERSIONS_DIR="${HOME}/.local/share/clor"
-VERSION_DIR="${VERSIONS_DIR}/${VERSION}"
-VERSIONED_EXE="${VERSION_DIR}/clor"
+# Where older installers kept per-version copies. Retained for cleanup only.
+LEGACY_DIR="${HOME}/.local/share/clor"
 BASE_URL="https://github.com/clorhq/cli/releases/download/${VERSION}"
 # Keep these variables literal for the shell rc file written later.
 # shellcheck disable=SC2016
@@ -312,6 +311,32 @@ normalize_clor_version() {
     fi
 }
 
+# Older installers kept every release under ~/.local/share/clor/<version>/ and
+# symlinked ~/.local/bin/clor at the active one. Nothing reads those copies
+# now, and on macOS each retained inode counts as a separate binary for
+# security bookkeeping. Clean them up once ${EXE} is a real file, so we never
+# delete the tree a still-live symlink points at. Silent and never fatal.
+
+remove_legacy_installs() {
+    local dir
+
+    if [[ ! -f "${EXE}" || -L "${EXE}" ]]; then
+        return 0
+    fi
+
+    # Only the version directories are ours to remove; anything else a user
+    # put under ${LEGACY_DIR} stays, and the rmdir leaves it in place.
+    for dir in "${LEGACY_DIR}"/v[0-9]*; do
+        [[ -d "${dir}" ]] || continue
+        log_debug "Removing legacy install ${dir}..."
+        rm -rf "${dir}" || true
+    done
+    rmdir "${LEGACY_DIR}" >/dev/null 2>&1 || true
+
+    # Temp files orphaned by an interrupted run, in both the old and new naming.
+    rm -f "${INSTALL_DIR}"/.clor.new.* "${INSTALL_DIR}"/clor.tmp.* 2>/dev/null || true
+}
+
 # Everything runs inside main() so that a connection drop mid-download
 # leaves bash without the final `main "$@"` line and nothing executes.
 
@@ -385,8 +410,11 @@ main() {
         version_output="$("${EXE}" version 2>/dev/null || true)"
         current_version="$(normalize_clor_version "${version_output}")"
     fi
+    # A symlink here is a legacy layout; reinstall to convert it into the real
+    # binary even when the version already matches.
     if [[ "${CLOR_INSTALL_FORCE}" == "true" ||
-          "${current_version}" != "${VERSION}" ]]; then
+          "${current_version}" != "${VERSION}" ||
+          -L "${EXE}" ]]; then
 
         # curl or wget, whichever exists.
 
@@ -400,15 +428,14 @@ main() {
             exit 1
         fi
 
-        # ~/.local/share/clor/<version>/clor is the real binary;
-        # ~/.local/bin/clor is a symlink to the active one, so rollback is one
-        # ln command.
+        mkdir -p "${INSTALL_DIR}"
 
-        mkdir -p "${INSTALL_DIR}" "${VERSION_DIR}"
-
-        # Download to a temp file in the versioned directory, verify, then
-        # rename(2) into place atomically; a running clor keeps its old inode.
-        TMP="${VERSIONED_EXE}.tmp.$$"
+        # Download to a temp file in ${INSTALL_DIR} itself, verify, then
+        # rename(2) into place atomically. Same directory means the same
+        # filesystem, so `mv` can never fall back to a copy. A running clor
+        # keeps its old inode open until it exits. The dot prefix keeps a
+        # partial download out of PATH lookup and shell completion.
+        TMP="${INSTALL_DIR}/.clor.new.$$"
         SUMTMP="${TMP}.sha256"
         trap 'rm -f "${TMP}" "${SUMTMP}"' EXIT
 
@@ -464,7 +491,7 @@ main() {
             exit 1
         fi
 
-        chmod +x "${TMP}"
+        chmod 755 "${TMP}"
         log_debug "Verifying the downloaded binary runs..."
         if ! "${TMP}" --help >/dev/null 2>&1; then
             log_error "The downloaded binary failed to run; refusing to activate it."
@@ -472,21 +499,18 @@ main() {
             log_support_hint
             exit 1
         fi
-        mv -f "${TMP}" "${VERSIONED_EXE}"
-        rm -f "${SUMTMP}"
-
-        # Create the new link beside the active one, then rename(2) it over the
-        # active path. If link creation or the rename fails, the old link stays
-        # in place and the EXIT trap removes the temporary link.
-
-        TMP="${EXE}.tmp.$$"
-        ln -s "${VERSIONED_EXE}" "${TMP}"
+        # One rename(2) publishes the verified binary. Readers see either the
+        # old complete binary or the new one, never a partial file. A path that
+        # is currently a legacy symlink is replaced by the file itself.
         mv -f "${TMP}" "${EXE}"
+        rm -f "${SUMTMP}"
         trap - EXIT
-        log_debug "Linked ${EXE} -> ${VERSIONED_EXE}"
+        log_debug "Installed ${VERSION} at ${EXE}"
     else
         log_debug "Clor ${VERSION} is already active; skipping the binary download."
     fi
+
+    remove_legacy_installs
 
     # Add ~/.local/bin to PATH for the user's shell when missing. fish uses
     # its universal path; bash and zsh get a marked rc line so re-runs do
