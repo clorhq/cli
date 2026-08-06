@@ -1,0 +1,130 @@
+#!/bin/bash
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+REPOSITORY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+INSTALL_SCRIPT="${REPOSITORY_DIR}/install.sh"
+PINNED_VERSION="$(awk -F '"' '/^LATEST_VERSION=/{print $2; exit}' "${INSTALL_SCRIPT}")"
+TEST_ROOT="$(mktemp --directory)"
+trap 'rm --recursive --force "${TEST_ROOT}"' EXIT
+
+fail() {
+    printf 'FAIL %s\n' "$1" >&2
+    exit 1
+}
+
+prepare_home() {
+    local TEST_NAME="$1"
+    local TEST_HOME="${TEST_ROOT}/${TEST_NAME}/home"
+    local TEST_BIN="${TEST_HOME}/.local/bin"
+    mkdir --parents "${TEST_BIN}"
+    # The single-quoted lines are the literal source of the fake executable.
+    # shellcheck disable=SC2016
+    printf '%s\n' \
+        '#!/bin/bash' \
+        'set -o nounset' \
+        'printf '\''%s\n'\'' "$*" >> "${CLOR_TEST_LOG}"' \
+        'case "${1:-}" in' \
+        '    version) printf '\''clor version %s\n'\'' "${CLOR_TEST_VERSION}" ;;' \
+        '    account) exit "${CLOR_TEST_LOGIN_EXIT:-0}" ;;' \
+        '    install) exit "${CLOR_TEST_INSTALL_EXIT:-0}" ;;' \
+        '    --help) exit 0 ;;' \
+        'esac' > "${TEST_BIN}/clor"
+    chmod 755 "${TEST_BIN}/clor"
+    printf '%s\n' \
+        '#!/bin/bash' \
+        'exit 0' > "${TEST_BIN}/systemctl"
+    chmod 755 "${TEST_BIN}/systemctl"
+    printf '%s\n' "${TEST_HOME}"
+}
+
+run_install() {
+    local TEST_HOME="$1"
+    local LOGIN_EXIT="$2"
+    local INSTALL_FROM_CLI="$3"
+    local TEST_OUTPUT="$4"
+    local TEST_LOG="$5"
+    local TEST_PATH="${TEST_HOME}/.local/bin:/usr/bin:/bin"
+    local COMMAND
+    COMMAND="env HOME=${TEST_HOME} PATH=${TEST_PATH} SHELL=/bin/bash CLOR_AUTOUPDATE=false CLOR_INSTALL_FORCE=false CLOR_INSTALL_FROM_CLI=${INSTALL_FROM_CLI} CLOR_TEST_VERSION=${PINNED_VERSION} CLOR_TEST_LOGIN_EXIT=${LOGIN_EXIT} CLOR_TEST_LOG=${TEST_LOG} /bin/bash ${INSTALL_SCRIPT}"
+    script --quiet --return --command "${COMMAND}" /dev/null > "${TEST_OUTPUT}" 2>&1
+}
+
+test_login_failure_stops_install() {
+    local TEST_HOME
+    local TEST_LOG
+    local TEST_OUTPUT
+    TEST_HOME="$(prepare_home login-failure)"
+    TEST_LOG="${TEST_ROOT}/login-failure/invocations"
+    TEST_OUTPUT="${TEST_ROOT}/login-failure/output"
+
+    if run_install "${TEST_HOME}" "23" "" "${TEST_OUTPUT}" "${TEST_LOG}"; then
+        fail "login failure returned zero"
+    fi
+    grep --fixed-strings --line-regexp 'account login --wait' "${TEST_LOG}" >/dev/null ||
+        fail "login failure did not invoke account login"
+    if grep --fixed-strings --line-regexp 'install' "${TEST_LOG}" >/dev/null; then
+        fail "login failure invoked install"
+    fi
+}
+
+test_login_success_runs_install() {
+    local TEST_HOME
+    local TEST_LOG
+    local TEST_OUTPUT
+    TEST_HOME="$(prepare_home login-success)"
+    TEST_LOG="${TEST_ROOT}/login-success/invocations"
+    TEST_OUTPUT="${TEST_ROOT}/login-success/output"
+
+    run_install "${TEST_HOME}" "0" "" "${TEST_OUTPUT}" "${TEST_LOG}"
+    grep --fixed-strings --line-regexp 'account login --wait' "${TEST_LOG}" >/dev/null ||
+        fail "successful setup did not invoke account login"
+    grep --fixed-strings --line-regexp 'install' "${TEST_LOG}" >/dev/null ||
+        fail "successful login did not invoke install"
+    if [[ "$(grep --extended-regexp --count '^(account login --wait|install)$' "${TEST_LOG}")" != "2" ]]; then
+        fail "successful setup did not invoke login and install exactly once"
+    fi
+}
+
+test_cli_recursion_guard_skips_bootstrap() {
+    local TEST_HOME
+    local TEST_LOG
+    local TEST_OUTPUT
+    TEST_HOME="$(prepare_home recursion-guard)"
+    TEST_LOG="${TEST_ROOT}/recursion-guard/invocations"
+    TEST_OUTPUT="${TEST_ROOT}/recursion-guard/output"
+
+    run_install "${TEST_HOME}" "0" "1" "${TEST_OUTPUT}" "${TEST_LOG}"
+    if grep --extended-regexp '^(account|install)' "${TEST_LOG}" >/dev/null; then
+        fail "CLI recursion guard ran the script bootstrap"
+    fi
+}
+
+test_headless_install_reports_remaining_setup() {
+    local TEST_HOME
+    local TEST_LOG
+    local TEST_OUTPUT
+    local TEST_PATH
+    TEST_HOME="$(prepare_home headless)"
+    TEST_LOG="${TEST_ROOT}/headless/invocations"
+    TEST_OUTPUT="${TEST_ROOT}/headless/output"
+    TEST_PATH="${TEST_HOME}/.local/bin:/usr/bin:/bin"
+
+    env HOME="${TEST_HOME}" PATH="${TEST_PATH}" SHELL=/bin/bash \
+        CLOR_AUTOUPDATE=false CLOR_INSTALL_FORCE=false CLOR_TEST_VERSION="${PINNED_VERSION}" \
+        CLOR_TEST_LOG="${TEST_LOG}" \
+        /bin/bash "${INSTALL_SCRIPT}" > "${TEST_OUTPUT}" 2>&1
+    grep --fixed-strings 'To finish setup, run' "${TEST_OUTPUT}" >/dev/null ||
+        fail "headless install did not identify incomplete setup"
+    if grep --extended-regexp '^(account|install)' "${TEST_LOG}" >/dev/null; then
+        fail "headless install attempted authenticated setup"
+    fi
+}
+
+test_login_failure_stops_install
+test_login_success_runs_install
+test_cli_recursion_guard_skips_bootstrap
+test_headless_install_reports_remaining_setup
+printf 'PASS install.sh authentication bootstrap\n'

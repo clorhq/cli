@@ -570,14 +570,14 @@ main() {
 
     # With a terminal available, continue setup: sign in, then register the
     # daemon service and install the skills via `clor install`.
-    # CLOR_INSTALL_FROM_CLI=1 means `clor install` invoked this script and
-    # runs those steps itself.
+    # CLOR_INSTALL_FROM_CLI=1 means the authenticated parent `clor install`
+    # invoked this script and runs those steps itself.
     # Without a terminal (CI, Dockerfiles), stop after installing the
     # binary and print the next command.
 
     if [[ "${CLOR_INSTALL_FROM_CLI:-}" != "1" ]]; then
         if [[ -t 1 && -r /dev/tty ]]; then
-            "${EXE}" account login --wait </dev/tty || true
+            "${EXE}" account login --wait </dev/tty
             CLOR_INSTALL_FORCE="false" "${EXE}" install </dev/tty
         else
             log_info ""
