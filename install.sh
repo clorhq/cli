@@ -78,9 +78,80 @@ clor_systemctl() {
     fi
 }
 
+# Return a stable, installation-specific identity without persisting or
+# exposing it. The user ID keeps separate per-user installs on one machine
+# from necessarily checking at the same minute.
+autoupdate_identity() {
+    local os="$1"
+    local machine_identity=""
+
+    case "${os}" in
+        linux)
+            if [[ -r /etc/machine-id ]]; then
+                IFS= read -r machine_identity < /etc/machine-id || true
+            fi
+            ;;
+        darwin)
+            if command -v ioreg >/dev/null 2>&1; then
+                machine_identity="$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null |
+                    awk -F '"' '/"IOPlatformUUID"/ { print $(NF - 1); exit }' || true)"
+            fi
+            ;;
+    esac
+
+    if [[ -z "${machine_identity}" ]]; then
+        machine_identity="$(hostname 2>/dev/null || true)"
+    fi
+    if [[ -z "${machine_identity}" ]]; then
+        machine_identity="$(uname -n 2>/dev/null || true)"
+    fi
+    if [[ -z "${machine_identity}" ]]; then
+        machine_identity="unknown-host"
+    fi
+
+    printf 'machine=%s\nuser=%s' "${machine_identity}" "$(id -u)"
+}
+
+# Map an identity to one of the 61 minute slots from 02:30 through 03:30.
+# This accepts the identity as an argument so the mapping can be tested without
+# reading or revealing the identity of the machine running the test.
+autoupdate_time_for_identity() {
+    local identity="$1"
+    local digest offset total_minutes
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        if ! digest="$(printf '%s' "${identity}" | sha256sum | awk '{ print $1 }')"; then
+            return 1
+        fi
+    elif command -v shasum >/dev/null 2>&1; then
+        if ! digest="$(printf '%s' "${identity}" | shasum -a 256 | awk '{ print $1 }')"; then
+            return 1
+        fi
+    else
+        return 1
+    fi
+    if [[ ! "${digest}" =~ ^[a-fA-F0-9]{64}$ ]]; then
+        return 1
+    fi
+
+    # Eight hex digits are enough for an even spread and fit Bash arithmetic
+    # on every supported architecture.
+    offset=$((16#${digest:0:8} % 61))
+    total_minutes=$((2 * 60 + 30 + offset))
+    printf '%d %d\n' "$((total_minutes / 60))" "$((total_minutes % 60))"
+}
+
+autoupdate_time() {
+    local os="$1"
+    local identity
+    identity="$(autoupdate_identity "${os}")"
+    autoupdate_time_for_identity "${identity}"
+}
+
 install_systemd_autoupdate() {
     local unit_dir service timer service_tmp timer_tmp
     local escaped_home escaped_path escaped_exe
+    local schedule schedule_hour schedule_minute schedule_time
 
     if ! command -v systemctl >/dev/null 2>&1; then
         log_info "warning: systemd is unavailable; clor automatic updates were not scheduled."
@@ -98,6 +169,12 @@ install_systemd_autoupdate() {
     escaped_home="$(systemd_escape "${HOME}")"
     escaped_path="$(systemd_escape "${INSTALL_DIR}:${PATH}")"
     escaped_exe="$(systemd_escape "${EXE}")"
+    if ! schedule="$(autoupdate_time linux)"; then
+        log_info "warning: a stable update time could not be calculated; clor automatic updates were not scheduled."
+        return 0
+    fi
+    read -r schedule_hour schedule_minute <<< "${schedule}"
+    printf -v schedule_time '%02d:%02d' "${schedule_hour}" "${schedule_minute}"
 
     mkdir -p "${unit_dir}"
     {
@@ -116,13 +193,10 @@ install_systemd_autoupdate() {
     {
         printf '%s\n' \
             '[Unit]' \
-            'Description=Check every six hours for clor updates' \
+            "Description=Check nightly at ${schedule_time} for clor updates" \
             '' \
             '[Timer]' \
-            'OnCalendar=*-*-* 00:00:00' \
-            'OnCalendar=*-*-* 06:00:00' \
-            'OnCalendar=*-*-* 12:00:00' \
-            'OnCalendar=*-*-* 18:00:00' \
+            "OnCalendar=*-*-* ${schedule_time}:00" \
             'Persistent=true' \
             'Unit=clor-autoupdate.service' \
             '' \
@@ -138,7 +212,7 @@ install_systemd_autoupdate() {
         log_info "warning: systemd could not schedule clor automatic updates."
         return 0
     fi
-    log_debug "Scheduled clor updates every six hours with systemd."
+    log_debug "Scheduled clor updates nightly at ${schedule_time} local time with systemd."
 }
 
 remove_systemd_autoupdate() {
@@ -173,6 +247,7 @@ xml_escape() {
 install_launchd_autoupdate() {
     local plist plist_tmp domain
     local escaped_home escaped_path escaped_exe
+    local schedule schedule_hour schedule_minute schedule_time
     if ! command -v launchctl >/dev/null 2>&1; then
         log_info "warning: launchd is unavailable; clor automatic updates were not scheduled."
         return 0
@@ -183,6 +258,12 @@ install_launchd_autoupdate() {
     escaped_home="$(xml_escape "${HOME}")"
     escaped_path="$(xml_escape "${INSTALL_DIR}:${PATH}")"
     escaped_exe="$(xml_escape "${EXE}")"
+    if ! schedule="$(autoupdate_time darwin)"; then
+        log_info "warning: a stable update time could not be calculated; clor automatic updates were not scheduled."
+        return 0
+    fi
+    read -r schedule_hour schedule_minute <<< "${schedule}"
+    printf -v schedule_time '%02d:%02d' "${schedule_hour}" "${schedule_minute}"
 
     mkdir -p "$(dirname "${plist}")"
     {
@@ -209,10 +290,13 @@ install_launchd_autoupdate() {
         <key>PATH</key>
         <string>${escaped_path}</string>
     </dict>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>StartInterval</key>
-    <integer>21600</integer>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>${schedule_hour}</integer>
+        <key>Minute</key>
+        <integer>${schedule_minute}</integer>
+    </dict>
     <key>StandardOutPath</key>
     <string>/dev/null</string>
     <key>StandardErrorPath</key>
@@ -227,14 +311,14 @@ EOF
     # A loaded job may be the parent of this install. Leave it running; the
     # atomically replaced plist will be used after the next login.
     if launchctl print "${domain}/com.clor.autoupdate" >/dev/null 2>&1; then
-        log_debug "Clor updates are already scheduled with launchd."
+        log_debug "Updated the nightly clor schedule to ${schedule_time} local time; launchd will use it after the next login."
         return 0
     fi
     if ! launchctl bootstrap "${domain}" "${plist}" >/dev/null 2>&1; then
         log_info "warning: launchd could not schedule clor automatic updates."
         return 0
     fi
-    log_debug "Scheduled clor updates every six hours with launchd."
+    log_debug "Scheduled clor updates nightly at ${schedule_time} local time with launchd."
 }
 
 remove_launchd_autoupdate() {
@@ -590,4 +674,6 @@ main() {
     fi
 }
 
-main "$@"
+if [[ -z "${BASH_SOURCE[0]:-}" || "${BASH_SOURCE[0]:-}" == "$0" ]]; then
+    main "$@"
+fi

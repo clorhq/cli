@@ -24,19 +24,22 @@ curl https://clor.com/install.sh | bash
 Detects your OS/arch, downloads the matching binary into
 `~/.local/bin/clor`, verifies its SHA-256 against the published
 sidecar, adds `~/.local/bin` to `PATH` if missing, and runs `clor`.
-It also schedules `clor install` every six hours using a systemd timer on
-Linux or a launchd agent on macOS. Each run refreshes normal daemon and skill
-setup, but the installer skips the binary download when `clor version`
-already matches the requested release. A failed run is attempted again at the
-next scheduled time.
+It also schedules `clor install` once nightly using a systemd timer on Linux
+or a launchd agent on macOS. Each machine and user gets a stable time between
+02:30 and 03:30 in the machine's local timezone, spreading update checks around
+03:00. Reinstalling or upgrading on the same machine and user account keeps the
+same time. Each run refreshes normal daemon and skill setup, but the installer
+skips the binary download when
+`clor version` already matches the requested release. A failed run is attempted
+again at the next scheduled time.
 
 On Linux, a root/system timer runs continuously. A user timer runs while its
 user manager is available; enable lingering if it must keep running while the
 user is logged out. The timer uses `Persistent=true`, so a missed update runs
-when the user manager starts again. On macOS, the launchd agent runs at login
-and then every six hours while the user remains logged in.
+when the user manager starts again. On macOS, the launchd agent runs at its
+assigned nightly time while the user is logged in.
 
-To install without the six-hour updater, put the environment variable on
+To install without the nightly updater, put the environment variable on
 the `bash` side of the pipe so the installer receives it:
 
 ```sh
@@ -72,11 +75,11 @@ for `--wait` and other options.
 
 ## Upgrading
 
-Automatic installs check every six hours. You can also re-run
-`curl https://clor.com/install.sh | bash` or re-run the manual install
-command for your platform. The new binary replaces `~/.local/bin/clor` in
-place, atomically, and no old versions are kept. A `clor` process that is
-already running keeps working until it exits.
+Automatic installs check once nightly at the installation's stable assigned
+time. You can also re-run `curl https://clor.com/install.sh | bash` or the
+manual install command for your platform. The new binary replaces
+`~/.local/bin/clor` in place, atomically, and no old versions are kept. A
+`clor` process that is already running keeps working until it exits.
 
 A normal install skips downloading the binary when the installed version
 already matches `LATEST_VERSION` (or an explicit `CLOR_VERSION`). Use
@@ -88,13 +91,13 @@ curl https://clor.com/install.sh | CLOR_INSTALL_FORCE="true" bash
 ```
 
 To pin a release, set `CLOR_VERSION`. A pin does not install or retain the
-six-hour updater unless you explicitly opt back in:
+nightly updater unless you explicitly opt back in:
 
 ```sh
 # Pin this release and disable automatic updates.
 curl https://clor.com/install.sh | CLOR_VERSION="v1.7.1" bash
 
-# Install this release now, then track future stable releases every six hours.
+# Install this release now, then check nightly for future stable releases.
 curl https://clor.com/install.sh | CLOR_VERSION="v1.7.1" CLOR_AUTOUPDATE="true" bash
 ```
 

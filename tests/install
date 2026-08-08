@@ -15,6 +15,10 @@ fail() {
     exit 1
 }
 
+# Loading the installer exposes its internal helpers without running main.
+# shellcheck disable=SC1090
+source "${INSTALL_SCRIPT}"
+
 prepare_home() {
     local TEST_NAME="$1"
     local TEST_HOME="${TEST_ROOT}/${TEST_NAME}/home"
@@ -123,8 +127,140 @@ test_headless_install_reports_remaining_setup() {
     fi
 }
 
+test_autoupdate_time_is_stable_and_bounded() {
+    local first second hour minute total identity index
+
+    first="$(autoupdate_time_for_identity 'stable-fixture')"
+    second="$(autoupdate_time_for_identity 'stable-fixture')"
+    [[ "${first}" == "${second}" ]] || fail "automatic update time was not stable"
+
+    for index in $(seq 0 200); do
+        identity="range-fixture-${index}"
+        read -r hour minute <<< "$(autoupdate_time_for_identity "${identity}")"
+        total=$((hour * 60 + minute))
+        if ((total < 150 || total > 210)); then
+            fail "automatic update time fell outside 02:30-03:30"
+        fi
+    done
+
+    [[ "$(autoupdate_time_for_identity 'fixture-101')" == "2 30" ]] ||
+        fail "automatic update lower boundary was incorrect"
+    [[ "$(autoupdate_time_for_identity 'fixture-1191')" == "2 59" ]] ||
+        fail "automatic update 02:59 boundary was incorrect"
+    [[ "$(autoupdate_time_for_identity 'fixture-1061')" == "3 0" ]] ||
+        fail "automatic update 03:00 boundary was incorrect"
+    [[ "$(autoupdate_time_for_identity 'fixture-1047')" == "3 30" ]] ||
+        fail "automatic update upper boundary was incorrect"
+}
+
+test_checksum_implementations_match() {
+    local sha256sum_bin shasum_bin awk_bin
+    local gnu_path bsd_path gnu_time bsd_time
+
+    sha256sum_bin="$(command -v sha256sum)"
+    shasum_bin="$(command -v shasum)"
+    awk_bin="$(command -v awk)"
+    gnu_path="${TEST_ROOT}/checksum-gnu"
+    bsd_path="${TEST_ROOT}/checksum-bsd"
+    mkdir -p "${gnu_path}" "${bsd_path}"
+    ln -s "${sha256sum_bin}" "${gnu_path}/sha256sum"
+    ln -s "${awk_bin}" "${gnu_path}/awk"
+    ln -s "${shasum_bin}" "${bsd_path}/shasum"
+    ln -s "${awk_bin}" "${bsd_path}/awk"
+
+    gnu_time="$(PATH="${gnu_path}" /bin/bash -c \
+        'source "$1"; autoupdate_time_for_identity "$2"' _ \
+        "${INSTALL_SCRIPT}" 'checksum-fixture')"
+    bsd_time="$(PATH="${bsd_path}" /bin/bash -c \
+        'source "$1"; autoupdate_time_for_identity "$2"' _ \
+        "${INSTALL_SCRIPT}" 'checksum-fixture')"
+    [[ "${gnu_time}" == "${bsd_time}" ]] ||
+        fail "sha256sum and shasum produced different automatic update times"
+}
+
+test_identity_falls_back_to_hostname_and_includes_user() {
+    local identity
+    identity="$({
+        # shellcheck disable=SC2317
+        ioreg() { printf '%s\n' '    "IOPlatformUUID" = "platform-uuid"'; }
+        # shellcheck disable=SC2317
+        id() { printf '%s\n' '4242'; }
+        autoupdate_identity darwin
+    })"
+    [[ "${identity}" == $'machine=platform-uuid\nuser=4242' ]] ||
+        fail "macOS platform UUID and user ID were not used for the identity"
+
+    identity="$({
+        # These functions are invoked indirectly by autoupdate_identity.
+        # shellcheck disable=SC2317
+        ioreg() { printf '%s\n' 'no platform UUID here'; }
+        # shellcheck disable=SC2317
+        hostname() { printf '%s\n' 'fallback-host'; }
+        # shellcheck disable=SC2317
+        id() { printf '%s\n' '4242'; }
+        autoupdate_identity darwin
+    })"
+    [[ "${identity}" == $'machine=fallback-host\nuser=4242' ]] ||
+        fail "missing platform identity did not fall back to hostname and user ID"
+}
+
+test_generated_scheduler_configurations() {
+    local test_home timer plist
+    test_home="${TEST_ROOT}/schedulers/home"
+    mkdir -p "${test_home}"
+
+    (
+        HOME="${test_home}"
+        INSTALL_DIR="${HOME}/.local/bin"
+        EXE="${INSTALL_DIR}/clor"
+        # shellcheck disable=SC2317
+        systemctl() { return 0; }
+        # shellcheck disable=SC2317
+        autoupdate_identity() { printf '%s' 'fixture-1061'; }
+        install_systemd_autoupdate
+    )
+    timer="${test_home}/.config/systemd/user/clor-autoupdate.timer"
+    [[ -f "${timer}" ]] || fail "systemd timer was not generated"
+    [[ "$(grep -c '^OnCalendar=' "${timer}")" == "1" ]] ||
+        fail "systemd timer did not contain exactly one calendar schedule"
+    grep -Fx 'OnCalendar=*-*-* 03:00:00' "${timer}" >/dev/null ||
+        fail "systemd timer had the wrong nightly schedule"
+    grep -Fx 'Persistent=true' "${timer}" >/dev/null ||
+        fail "systemd timer did not remain persistent"
+
+    (
+        HOME="${test_home}"
+        INSTALL_DIR="${HOME}/.local/bin"
+        # Used by the sourced launchd installer helper.
+        # shellcheck disable=SC2034
+        EXE="${INSTALL_DIR}/clor"
+        # shellcheck disable=SC2317
+        launchctl() {
+            [[ "${1:-}" != "print" ]]
+        }
+        # shellcheck disable=SC2317
+        autoupdate_identity() { printf '%s' 'fixture-1061'; }
+        install_launchd_autoupdate
+    )
+    plist="${test_home}/Library/LaunchAgents/com.clor.autoupdate.plist"
+    [[ -f "${plist}" ]] || fail "launchd plist was not generated"
+    [[ "$(grep -c '<key>StartCalendarInterval</key>' "${plist}")" == "1" ]] ||
+        fail "launchd plist did not contain exactly one calendar schedule"
+    grep -A1 '<key>Hour</key>' "${plist}" | grep -F '<integer>3</integer>' >/dev/null ||
+        fail "launchd plist had the wrong nightly hour"
+    grep -A1 '<key>Minute</key>' "${plist}" | grep -F '<integer>0</integer>' >/dev/null ||
+        fail "launchd plist had the wrong nightly minute"
+    if grep -E '<key>(RunAtLoad|StartInterval)</key>|<integer>21600</integer>' "${plist}" >/dev/null; then
+        fail "launchd plist retained an obsolete trigger"
+    fi
+}
+
 test_login_failure_stops_install
 test_login_success_runs_install
 test_cli_recursion_guard_skips_bootstrap
 test_headless_install_reports_remaining_setup
-printf 'PASS install.sh authentication bootstrap\n'
+test_autoupdate_time_is_stable_and_bounded
+test_checksum_implementations_match
+test_identity_falls_back_to_hostname_and_includes_user
+test_generated_scheduler_configurations
+printf 'PASS install.sh installer and automatic update scheduling\n'
