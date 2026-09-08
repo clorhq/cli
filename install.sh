@@ -18,7 +18,7 @@ set -o pipefail
 
 DEBUG="${DEBUG:-false}"
 SUPPORT_EMAIL="support@clor.com"
-LATEST_VERSION="v1.9.167"
+LATEST_VERSION="v1.9.168"
 VERSION="${CLOR_VERSION:-${LATEST_VERSION}}"
 CLOR_INSTALL_FORCE="${CLOR_INSTALL_FORCE:-false}"
 if [[ "${CLOR_AUTOUPDATE:-}" == "" ]]; then
